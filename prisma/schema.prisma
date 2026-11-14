@@ -1,0 +1,866 @@
+// CS Card Station - MySQL 8 schema
+// Source of truth for users, social graph, game results and the virtual points ledger.
+// Redis is used only for ephemeral presence/caching; never for permanent results.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+enum OtpPurpose {
+  REGISTER
+  LOGIN
+  RESET_PASSWORD
+}
+
+enum GameCode {
+  TEEN_PATTI
+  POKER
+  OMAHA
+  RUMMY
+  ANDAR_BAHAR
+  BACCARAT
+  GOLD_MINES
+}
+
+enum RoomVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum RoomStatus {
+  WAITING
+  PLAYING
+  CLOSED
+}
+
+enum RoomPlayerStatus {
+  SEATED
+  LEFT
+  KICKED
+}
+
+enum GameSessionStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABORTED
+}
+
+enum GameOutcome {
+  WIN
+  LOSS
+  DRAW
+  FOLD
+}
+
+enum AssociationVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum AssociationJoinPolicy {
+  OPEN
+  APPROVAL
+  INVITE_ONLY
+}
+
+enum AssociationRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  PENDING
+  BANNED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum ChatRoomType {
+  DIRECT
+  GROUP
+  ASSOCIATION
+  GAME_ROOM
+}
+
+enum MessageType {
+  TEXT
+  GIFT
+  SYSTEM
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  ACTIONED
+  DISMISSED
+}
+
+enum LedgerType {
+  SIGNUP_BONUS
+  DAILY_REWARD
+  TABLE_BUY_IN
+  TABLE_RETURN
+  GAME_WIN
+  GAME_LOSS
+  GIFT_SENT
+  ACHIEVEMENT_REWARD
+  ADMIN_ADJUSTMENT
+}
+
+enum LeaderboardPeriod {
+  WEEKLY
+  MONTHLY
+  ALL_TIME
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_USER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum AdminStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ActorType {
+  USER
+  ADMIN
+  SYSTEM
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+model User {
+  id             String     @id @default(uuid()) @db.Char(36)
+  csId           String     @unique @db.VarChar(16) // public "CS User ID", e.g. CS48210937
+  email          String     @unique @db.VarChar(254)
+  username       String     @unique @db.VarChar(24)
+  passwordHash   String @db.VarChar(255)
+  status         UserStatus @default(PENDING_VERIFICATION)
+  emailVerified  Boolean    @default(false)
+  pointsBalance  Int        @default(0)
+  lastSeenAt     DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  profile                 Profile?
+  sessions                Session[]
+  otps                    OtpVerification[]
+  roomPlayers             RoomPlayer[]
+  hostedRooms             Room[]                  @relation("RoomHost")
+  gameHistory             GameHistory[]
+  ownedAssociations       Association[]           @relation("AssociationOwner")
+  associationMemberships  AssociationMember[]
+  sentInvitations         AssociationInvitation[] @relation("Inviter")
+  receivedInvitations     AssociationInvitation[] @relation("Invitee")
+  friendshipsA            Friendship[]            @relation("FriendA")
+  friendshipsB            Friendship[]            @relation("FriendB")
+  sentFriendRequests      FriendRequest[]         @relation("FrSender")
+  receivedFriendRequests  FriendRequest[]         @relation("FrReceiver")
+  blocksMade              UserBlock[]             @relation("Blocker")
+  blocksReceived          UserBlock[]             @relation("Blocked")
+  reportsMade             UserReport[]            @relation("Reporter")
+  reportsReceived         UserReport[]            @relation("Reported")
+  chatMemberships         ChatMember[]
+  messages                Message[]
+  notifications           Notification[]
+  deviceTokens            DeviceToken[]
+  giftsSent               GiftTransaction[]       @relation("GiftSender")
+  giftsReceived           GiftTransaction[]       @relation("GiftReceiver")
+  achievements            UserAchievement[]
+  leaderboardEntries      LeaderboardEntry[]
+  ledger                  PointsLedger[]
+  dailyRewards            DailyRewardClaim[]
+  supportTickets          SupportTicket[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Profile {
+  userId              String   @id @db.Char(36)
+  displayName         String   @db.VarChar(40)
+  avatarUrl           String? @db.VarChar(512)
+  avatarPreset        String   @default("royal-1") @db.VarChar(32)
+  bio                 String?  @db.VarChar(280)
+  country             String?  @db.VarChar(2)
+  showOnlineStatus    Boolean  @default(true)
+  allowFriendRequests Boolean  @default(true)
+  allowRoomInvites    Boolean  @default(true)
+  tableTheme          String   @default("classic_green") @db.VarChar(32)
+  preferences         Json
+  updatedAt           DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Session {
+  id               String    @id @default(uuid()) @db.Char(36)
+  userId           String    @db.Char(36)
+  refreshTokenHash String @db.VarChar(128)
+  userAgent        String?   @db.VarChar(255)
+  ip               String?   @db.VarChar(64)
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model OtpVerification {
+  id         String     @id @default(uuid()) @db.Char(36)
+  userId     String?    @db.Char(36)
+  target     String     @db.VarChar(254)
+  purpose    OtpPurpose
+  codeHash   String @db.VarChar(128)
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([target, purpose, createdAt])
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid()) @db.Char(36)
+  userId    String   @db.Char(36)
+  token     String @db.VarChar(512)   @unique
+  platform  String   @db.VarChar(16)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ───────────────────────────── Games & Rooms ─────────────────────────────
+
+model GameCategory {
+  id        String   @id @default(uuid()) @db.Char(36)
+  slug      String   @unique @db.VarChar(40)
+  name      String   @db.VarChar(60)
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  games     Game[]
+}
+
+model Game {
+  id          String   @id @default(uuid()) @db.Char(36)
+  code        GameCode @unique
+  name        String   @db.VarChar(60)
+  tagline     String   @db.VarChar(120)
+  description String @db.Text
+  categoryId  String?  @db.Char(36)
+  minPlayers  Int
+  maxPlayers  Int
+  isActive    Boolean  @default(true)
+  isFeatured  Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  config      Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  category     GameCategory? @relation(fields: [categoryId], references: [id])
+  rooms        Room[]
+  sessions     GameSession[]
+  history      GameHistory[]
+}
+
+model Room {
+  id            String         @id @default(uuid()) @db.Char(36)
+  code          String         @unique @db.VarChar(8) // shareable Room ID
+  gameId        String         @db.Char(36)
+  hostId        String         @db.Char(36)
+  name          String         @db.VarChar(60)
+  visibility    RoomVisibility @default(PUBLIC)
+  passwordHash  String? @db.VarChar(255)
+  associationId String?        @db.Char(36)
+  maxPlayers    Int
+  status        RoomStatus     @default(WAITING)
+  config        Json
+  createdAt     DateTime       @default(now())
+  closedAt      DateTime?
+
+  game        Game          @relation(fields: [gameId], references: [id])
+  host        User          @relation("RoomHost", fields: [hostId], references: [id])
+  association Association?  @relation(fields: [associationId], references: [id])
+  players     RoomPlayer[]
+  sessions    GameSession[]
+  chatRoom    ChatRoom?
+
+  @@index([status, visibility])
+  @@index([gameId, status])
+}
+
+/// "Players": a user's seat in a room. stack = chips currently on the table (persisted after each hand).
+model RoomPlayer {
+  id       String           @id @default(uuid()) @db.Char(36)
+  roomId   String           @db.Char(36)
+  userId   String           @db.Char(36)
+  seat     Int
+  stack    Int              @default(0)
+  status   RoomPlayerStatus @default(SEATED)
+  joinedAt DateTime         @default(now())
+  leftAt   DateTime?
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([roomId, userId])
+  @@index([userId, status])
+}
+
+model GameSession {
+  id           String            @id @default(uuid()) @db.Char(36)
+  roomId       String            @db.Char(36)
+  gameId       String            @db.Char(36)
+  handNumber   Int
+  status       GameSessionStatus @default(IN_PROGRESS)
+  seedCommit   String            @db.VarChar(64) // sha256 of the shuffle seed, revealed at end
+  seedReveal   String?           @db.VarChar(64)
+  stateVersion Int               @default(0)
+  summary      Json?
+  startedAt    DateTime          @default(now())
+  endedAt      DateTime?
+
+  room    Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  game    Game          @relation(fields: [gameId], references: [id])
+  history GameHistory[]
+  events  GameEvent[]
+
+  @@unique([roomId, handNumber])
+  @@index([gameId, startedAt])
+}
+
+model GameEvent {
+  id            String   @id @default(uuid()) @db.Char(36)
+  gameSessionId String   @db.Char(36)
+  seq           Int
+  type          String   @db.VarChar(48)
+  actorId       String?  @db.Char(36)
+  payload       Json
+  createdAt     DateTime @default(now())
+
+  session GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, seq])
+}
+
+model GameHistory {
+  id            String      @id @default(uuid()) @db.Char(36)
+  gameSessionId String      @db.Char(36)
+  userId        String      @db.Char(36)
+  gameId        String      @db.Char(36)
+  outcome       GameOutcome
+  pointsDelta   Int
+  rank          Int?
+  details       Json
+  createdAt     DateTime    @default(now())
+
+  session GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id])
+  game    Game        @relation(fields: [gameId], references: [id])
+
+  @@unique([gameSessionId, userId])
+  @@index([userId, createdAt])
+  @@index([gameId, createdAt])
+}
+
+// ───────────────────────────── Associations ─────────────────────────────
+
+model Association {
+  id          String                @id @default(uuid()) @db.Char(36)
+  publicId    String                @unique @db.VarChar(16) // e.g. AS7392011
+  name        String                @db.VarChar(48)
+  description String?               @db.VarChar(500)
+  avatarUrl   String? @db.VarChar(512)
+  emblem      String                @default("crown") @db.VarChar(32)
+  visibility  AssociationVisibility @default(PUBLIC)
+  joinPolicy  AssociationJoinPolicy @default(APPROVAL)
+  ownerId     String                @db.Char(36)
+  maxMembers  Int                   @default(200)
+  memberCount Int                   @default(1)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  deletedAt   DateTime?
+
+  owner       User                    @relation("AssociationOwner", fields: [ownerId], references: [id])
+  members     AssociationMember[]
+  invitations AssociationInvitation[]
+  rooms       Room[]
+  chatRoom    ChatRoom?
+
+  @@index([visibility, memberCount])
+  @@index([name])
+}
+
+model AssociationMember {
+  associationId String           @db.Char(36)
+  userId        String           @db.Char(36)
+  role          AssociationRole  @default(MEMBER)
+  status        MembershipStatus @default(ACTIVE)
+  joinedAt      DateTime         @default(now())
+  lastActiveAt  DateTime         @default(now())
+
+  association Association @relation(fields: [associationId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([associationId, userId])
+  @@index([userId, status])
+}
+
+model AssociationInvitation {
+  id            String           @id @default(uuid()) @db.Char(36)
+  associationId String           @db.Char(36)
+  inviterId     String           @db.Char(36)
+  inviteeId     String           @db.Char(36)
+  status        InvitationStatus @default(PENDING)
+  createdAt     DateTime         @default(now())
+  respondedAt   DateTime?
+
+  association Association @relation(fields: [associationId], references: [id], onDelete: Cascade)
+  inviter     User        @relation("Inviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  invitee     User        @relation("Invitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@index([inviteeId, status])
+  @@index([associationId, status])
+}
+
+// ───────────────────────────── Social ─────────────────────────────
+
+/// Undirected friendship; userAId < userBId (lexicographic) is enforced in code.
+model Friendship {
+  userAId   String   @db.Char(36)
+  userBId   String   @db.Char(36)
+  createdAt DateTime @default(now())
+
+  userA User @relation("FriendA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("FriendB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@id([userAId, userBId])
+  @@index([userBId])
+}
+
+model FriendRequest {
+  id          String              @id @default(uuid()) @db.Char(36)
+  senderId    String              @db.Char(36)
+  receiverId  String              @db.Char(36)
+  status      FriendRequestStatus @default(PENDING)
+  createdAt   DateTime            @default(now())
+  respondedAt DateTime?
+
+  sender   User @relation("FrSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("FrReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([receiverId, status])
+  @@index([senderId, status])
+}
+
+model UserBlock {
+  blockerId String   @db.Char(36)
+  blockedId String   @db.Char(36)
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+}
+
+model UserReport {
+  id          String       @id @default(uuid()) @db.Char(36)
+  reporterId  String       @db.Char(36)
+  reportedId  String       @db.Char(36)
+  reason      String       @db.VarChar(40)
+  details     String?      @db.VarChar(1000)
+  messageId   String?      @db.Char(36)
+  status      ReportStatus @default(OPEN)
+  resolution  String?      @db.VarChar(500)
+  handledById String?      @db.Char(36)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  reporter  User       @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reported  User       @relation("Reported", fields: [reportedId], references: [id], onDelete: Cascade)
+  handledBy AdminUser? @relation(fields: [handledById], references: [id])
+
+  @@index([status, createdAt])
+}
+
+// ───────────────────────────── Chat ─────────────────────────────
+
+model ChatRoom {
+  id            String       @id @default(uuid()) @db.Char(36)
+  type          ChatRoomType
+  name          String?      @db.VarChar(60)
+  directKey     String?      @unique @db.VarChar(80) // "<uuidA>:<uuidB>" sorted, for DIRECT
+  associationId String?      @unique @db.Char(36)
+  gameRoomId    String?      @unique @db.Char(36)
+  createdById   String?      @db.Char(36)
+  lastMessageAt DateTime?
+  createdAt     DateTime     @default(now())
+
+  association Association? @relation(fields: [associationId], references: [id], onDelete: Cascade)
+  gameRoom    Room?        @relation(fields: [gameRoomId], references: [id], onDelete: Cascade)
+  members     ChatMember[]
+  messages    Message[]
+
+  @@index([type, lastMessageAt])
+}
+
+model ChatMember {
+  chatRoomId String    @db.Char(36)
+  userId     String    @db.Char(36)
+  isAdmin    Boolean   @default(false)
+  lastReadAt DateTime  @default(now())
+  mutedUntil DateTime?
+  joinedAt   DateTime  @default(now())
+
+  chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([chatRoomId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id          String      @id @default(uuid()) @db.Char(36)
+  chatRoomId  String      @db.Char(36)
+  senderId    String?     @db.Char(36)
+  type        MessageType @default(TEXT)
+  content     String      @db.VarChar(2000)
+  meta        Json?
+  clientMsgId String?     @db.VarChar(64)
+  createdAt   DateTime    @default(now())
+  deletedAt   DateTime?
+  deletedBy   String?     @db.Char(36)
+
+  chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  sender   User?    @relation(fields: [senderId], references: [id], onDelete: SetNull)
+
+  @@unique([senderId, clientMsgId])
+  @@index([chatRoomId, createdAt])
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Char(36)
+  userId    String    @db.Char(36)
+  type      String    @db.VarChar(40)
+  title     String    @db.VarChar(120)
+  body      String    @db.VarChar(500)
+  data      Json
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+/// Admin-authored broadcast notifications (sent to all or a segment).
+model BroadcastNotification {
+  id          String   @id @default(uuid()) @db.Char(36)
+  title       String   @db.VarChar(120)
+  body        String   @db.VarChar(500)
+  audience    String   @default("ALL") @db.VarChar(32)
+  sentCount   Int      @default(0)
+  createdById String   @db.Char(36)
+  createdAt   DateTime @default(now())
+
+  createdBy AdminUser @relation(fields: [createdById], references: [id])
+}
+
+// ───────────────────────────── Rewards ─────────────────────────────
+
+model Gift {
+  id          String   @id @default(uuid()) @db.Char(36)
+  code        String   @unique @db.VarChar(32)
+  name        String   @db.VarChar(40)
+  icon        String   @db.VarChar(64)
+  animation   String   @default("float") @db.VarChar(32)
+  pricePoints Int
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  transactions GiftTransaction[]
+}
+
+model GiftTransaction {
+  id          String   @id @default(uuid()) @db.Char(36)
+  giftId      String   @db.Char(36)
+  senderId    String   @db.Char(36)
+  receiverId  String   @db.Char(36)
+  roomId      String?  @db.Char(36)
+  pointsSpent Int
+  message     String?  @db.VarChar(140)
+  createdAt   DateTime @default(now())
+
+  gift     Gift @relation(fields: [giftId], references: [id])
+  sender   User @relation("GiftSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("GiftReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([receiverId, createdAt])
+}
+
+model Achievement {
+  id           String   @id @default(uuid()) @db.Char(36)
+  code         String   @unique @db.VarChar(40)
+  name         String   @db.VarChar(60)
+  description  String   @db.VarChar(200)
+  icon         String   @db.VarChar(64)
+  metric       String   @db.VarChar(40) // e.g. games_played, games_won, friends_count
+  threshold    Int
+  gameCode     GameCode?
+  rewardPoints Int      @default(0)
+  isActive     Boolean  @default(true)
+
+  users UserAchievement[]
+}
+
+model UserAchievement {
+  userId        String   @db.Char(36)
+  achievementId String   @db.Char(36)
+  unlockedAt    DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@id([userId, achievementId])
+}
+
+/// Aggregated from GameHistory inside the same transaction that settles a hand.
+/// scope = "ALL" or a GameCode name.
+model LeaderboardEntry {
+  id        String            @id @default(uuid()) @db.Char(36)
+  period    LeaderboardPeriod
+  periodKey String            @db.VarChar(16) // 2026-W46 | 2026-11 | all
+  scope     String            @db.VarChar(16)
+  userId    String            @db.Char(36)
+  score     Int               @default(0)
+  wins      Int               @default(0)
+  played    Int               @default(0)
+  updatedAt DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([period, periodKey, scope, userId])
+  @@index([period, periodKey, scope, score])
+}
+
+/// Append-only ledger of virtual (non-redeemable) points.
+/// User.pointsBalance is updated in the same transaction; balanceAfter makes audits trivial.
+model PointsLedger {
+  id             String     @id @default(uuid()) @db.Char(36)
+  userId         String     @db.Char(36)
+  type           LedgerType
+  amount         Int
+  balanceAfter   Int
+  refType        String?    @db.VarChar(32)
+  refId          String?    @db.VarChar(64)
+  idempotencyKey String     @unique @db.VarChar(128)
+  note           String?    @db.VarChar(200)
+  createdAt      DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model DailyRewardClaim {
+  userId    String   @db.Char(36)
+  day       String   @db.VarChar(10) // YYYY-MM-DD (UTC)
+  streak    Int
+  points    Int
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, day])
+}
+
+// ───────────────────────────── Support ─────────────────────────────
+
+model SupportTicket {
+  id           String         @id @default(uuid()) @db.Char(36)
+  userId       String         @db.Char(36)
+  subject      String         @db.VarChar(120)
+  category     String         @db.VarChar(32)
+  status       TicketStatus   @default(OPEN)
+  priority     TicketPriority @default(NORMAL)
+  assignedToId String?        @db.Char(36)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedTo AdminUser?       @relation(fields: [assignedToId], references: [id])
+  messages   SupportMessage[]
+
+  @@index([status, updatedAt])
+  @@index([userId])
+}
+
+model SupportMessage {
+  id        String   @id @default(uuid()) @db.Char(36)
+  ticketId  String   @db.Char(36)
+  authorId  String   @db.Char(36)
+  fromStaff Boolean  @default(false)
+  body      String   @db.VarChar(4000)
+  createdAt DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}
+
+// ───────────────────────────── Administration ─────────────────────────────
+
+model AdminUser {
+  id           String      @id @default(uuid()) @db.Char(36)
+  email        String      @unique @db.VarChar(254)
+  name         String      @db.VarChar(60)
+  passwordHash String @db.VarChar(255)
+  roleId       String      @db.Char(36)
+  status       AdminStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  role            AdminRole               @relation(fields: [roleId], references: [id])
+  sessions        AdminSession[]
+  handledReports  UserReport[]
+  assignedTickets SupportTicket[]
+  broadcasts      BroadcastNotification[]
+}
+
+model AdminRole {
+  id          String   @id @default(uuid()) @db.Char(36)
+  key         String   @unique @db.VarChar(32) // SUPER_ADMIN | ADMIN | MODERATOR | SUPPORT
+  name        String   @db.VarChar(60)
+  description String?  @db.VarChar(200)
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  admins      AdminUser[]
+  permissions AdminRolePermission[]
+}
+
+model AdminPermission {
+  id          String  @id @default(uuid()) @db.Char(36)
+  key         String  @unique @db.VarChar(48) // e.g. users.read, users.ban
+  description String? @db.VarChar(200)
+
+  roles AdminRolePermission[]
+}
+
+model AdminRolePermission {
+  roleId       String @db.Char(36)
+  permissionId String @db.Char(36)
+
+  role       AdminRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission AdminPermission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model AdminSession {
+  id        String    @id @default(uuid()) @db.Char(36)
+  adminId   String    @db.Char(36)
+  tokenHash String @db.VarChar(128)    @unique
+  csrfToken String    @db.VarChar(64)
+  ip        String?   @db.VarChar(64)
+  userAgent String?   @db.VarChar(255)
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  admin AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+}
+
+model AuditLog {
+  id         String    @id @default(uuid()) @db.Char(36)
+  actorType  ActorType
+  actorId    String?   @db.Char(36)
+  action     String    @db.VarChar(64)
+  targetType String?   @db.VarChar(32)
+  targetId   String?   @db.VarChar(64)
+  metadata   Json
+  ip         String?   @db.VarChar(64)
+  createdAt  DateTime  @default(now())
+
+  @@index([actorType, actorId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+model SystemSetting {
+  key         String   @id @db.VarChar(64)
+  value       Json
+  description String?  @db.VarChar(200)
+  updatedById String?  @db.Char(36)
+  updatedAt   DateTime @updatedAt
+}
+
+model Banner {
+  id        String    @id @default(uuid()) @db.Char(36)
+  title     String    @db.VarChar(80)
+  subtitle  String?   @db.VarChar(160)
+  imageUrl  String? @db.VarChar(512)
+  linkUrl   String?   @db.VarChar(255)
+  theme     String    @default("gold") @db.VarChar(24)
+  isActive  Boolean   @default(true)
+  sortOrder Int       @default(0)
+  startsAt  DateTime?
+  endsAt    DateTime?
+  createdAt DateTime  @default(now())
+}

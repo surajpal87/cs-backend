@@ -1,0 +1,24 @@
+# Env & secrets
+.env
+.env.*
+!.env.example
+secrets/
+certs/
+*.pem
+*.keystore
+*.jks
+
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local data
+.pg-data/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
